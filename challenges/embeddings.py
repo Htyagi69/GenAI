@@ -3,6 +3,7 @@ import os
 from dotenv import load_dotenv
 from google.genai import types
 import math
+import json
 
 load_dotenv()
 
@@ -39,13 +40,12 @@ prompt=input(f">> ")
 embeddings=[]
 result=[]
 pair=[]
-for doc in document:
-  response=client.models.embed_content(
-      model="gemini-embedding-2",
-      contents=doc,
-      config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY")
-  )
-  embeddings.append(response.embeddings[0].values)
+all_data=None
+with open("embeddings.json","r",encoding="utf-8") as f:
+    all_data=json.load(f)
+
+embeddings=[item["embedd"] for item in all_data]
+
 
 inp=client.models.embed_content(
    model="gemini-embedding-2",
