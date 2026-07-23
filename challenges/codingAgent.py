@@ -136,6 +136,53 @@ search_tool = {
         "required": ["keyword"]
     }
 }
+ask_user_tool = {
+    "type": "function",
+    "name": "ask_user",
+    "description": "Ask the user for clarification.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "Question to ask the user"
+            }
+        },
+        "required": ["question"]
+    }
+}
+edit_file_tool = {
+    "type": "function",
+    "name": "edit_file_function",
+    "description": "Replace a range of lines in a file with new content.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "fileName": {
+                "type": "string",
+                "description": "Name of the file to edit."
+            },
+            "start_line": {
+                "type": "integer",
+                "description": "1-based starting line number (inclusive)."
+            },
+            "end_line": {
+                "type": "integer",
+                "description": "1-based ending line number (inclusive)."
+            },
+            "replacement": {
+                "type": "string",
+                "description": "New content that will replace the specified line range."
+            }
+        },
+        "required": [
+            "fileName",
+            "start_line",
+            "end_line",
+            "replacement"
+        ]
+    }
+}
 
 def create_function(fileName):
   try:
@@ -164,12 +211,13 @@ def list_function():
  
 def read_function(filePath):
  try:  
-   data=[]
    with open(f"{path}/{filePath}","r",encoding="utf-8") as f:
-      data.append(f.read())
-   return data
+      return f.read()
  except Exception as e:
-   return e 
+   return {
+    "success": False,
+    "error": str(e)
+    }
  
 def search_function(keyword):
  try:
@@ -190,7 +238,7 @@ def search_function(keyword):
    print(e)
    return e
 
-def run_function(fileName,args):
+def run_function(fileName,args=None):
   try:
     full_path=f"{path}/{fileName}"
     command=["python",full_path]
@@ -237,6 +285,27 @@ def run_tests(test_file=None):
  except Exception as e:
    return e
 
+def ask_user(question:str):
+  print(f"{question} \n")
+  return input(f">>")
+
+def edit_file_function(start_line,end_line,replacement,fileName):
+  try:
+     content=str(read_function(fileName))
+     content=content.splitlines(keepends=True)
+     starting=content[:start_line-1]
+     ending=content[end_line:]
+     newContent=starting + replacement.splitlines(keepends=True) + ending
+     with open(f"{path}/{fileName}","w",encoding="utf-8") as f:
+        f.writelines(newContent)
+     return {
+    "success": True,
+    "edited_lines": [start_line-1, end_line]
+}
+  except Exception as e:
+       print(e)
+       return e
+
 Tools={
    "list_function":list_function,
    "read_function":read_function,
@@ -245,7 +314,9 @@ Tools={
    "write_function":write_function,
    "run_function":run_function,
    "delete_function":delete_function,
-   "run_tests":run_tests
+   "run_tests":run_tests,
+   "ask_user":ask_user,
+   "edit_file_function":edit_file_function
 }
 
 def execute_tool(response):
@@ -266,23 +337,82 @@ def execute_tool(response):
            })
     return function_results
 
-conversation=[query]
 response = client.interactions.create(
     model="gemini-2.5-flash",
     input=query,
-    tools=[list_tool,read_tool,search_tool,create_tool,write_tool,run_tool,delete_tool,test_tool]
-)
+    tools=[list_tool,read_tool,search_tool,create_tool,write_tool,run_tool,delete_tool,test_tool,ask_user_tool,edit_file_tool],
+    system_instruction="""
+                 You are a coding agent.
+            
+                    General Rules:
+                    - Prefer the minimum number of tool calls required.
+                    - Never call a tool unless it is necessary.
+                    - Never ask the user questions in plain text.
+                    - If clarification is required, always use the ask_user tool.
+                    - If a requested file is not found, first use search_function or list_function.
+                    - Only ask the user if there is still ambiguity.
+                    
+                    Editing Rules:
+                    - Always read the target file before editing.
+                    - Identify the exact lines that need modification.
+                    - Use edit_file_function only for the affected lines.
+                    - After editing, run the file once to verify the fix.
+                    - Do not read the file again after editing unless verification requires inspecting the file contents.
+                    - Do not edit the same region multiple times unless the previous edit failed.
+                    
+                    Execution Rules:
+                    - Plan the complete solution before calling tools.
+                    - When possible, perform multiple independent tool calls in the same interaction.
+                    - Stop after the task is completed successfully.
+                 """,
+                 )
+MAX_RETRIES=5
 
 while True:
-  function_results=execute_tool(response)
-  if not function_results:
-    print(response.output_text)
-    break
-  response = client.interactions.create(
-      model="gemini-2.5-flash",
-      previous_interaction_id=response.id,
-      input=function_results,
-      tools=[list_tool,read_tool,search_tool,create_tool,write_tool,run_tool,delete_tool,test_tool]
-  )
+ for attempt in range(MAX_RETRIES):
+    try:
+       function_results=execute_tool(response)
+       break
+    except Exception as e: 
+      print(f"TOOL failed: {attempt}/{MAX_RETRIES} error:{e}")      
+      function_results=[{
+        "type": "function_result",
+        "name": "tool_error",
+        "result": f"Tool Execution Failed:{e}"
+      }]
+ if not function_results:
+   print(response.output_text)
+   break
+ response = client.interactions.create(
+              model="gemini-2.5-flash",
+              previous_interaction_id=response.id,
+              input=function_results,
+              tools=[list_tool,read_tool,search_tool,create_tool,write_tool,run_tool,delete_tool,test_tool,ask_user_tool,edit_file_tool],
+              system_instruction="""
+                 You are a coding agent.
+            
+                    General Rules:
+                    - Prefer the minimum number of tool calls required.
+                    - Never call a tool unless it is necessary.
+                    - Never ask the user questions in plain text.
+                    - If clarification is required, always use the ask_user tool.
+                    - If a requested file is not found, first use search_function or list_function.
+                    - Only ask the user if there is still ambiguity.
+                    
+                    Editing Rules:
+                    - Always read the target file before editing.
+                    - Identify the exact lines that need modification.
+                    - Use edit_file_function only for the affected lines.
+                    - After editing, run the file once to verify the fix.
+                    - Do not read the file again after editing unless verification requires inspecting the file contents.
+                    - Do not edit the same region multiple times unless the previous edit failed.
+                    
+                    Execution Rules:
+                    - Plan the complete solution before calling tools.
+                    - When possible, perform multiple independent tool calls in the same interaction.
+                    - Stop after the task is completed successfully.
+                 """,
+          )
+
 
      
